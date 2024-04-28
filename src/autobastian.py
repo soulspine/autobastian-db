@@ -4,10 +4,14 @@ import json
 import os
 import time
 import datetime
+import html
 
+import selenium.common
 import selenium.webdriver
+import selenium.webdriver.common
 from selenium.webdriver.common.by import By
 
+import selenium.webdriver.firefox
 from sqlalchemy import create_engine, Column, Integer, String, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -82,7 +86,7 @@ class Bot:
         self.config:Config = config
 
         print(f"Logging to {self.config.logfile}") if self.config.logging else print("Logging disabled.")
-        self.log(f"Bot initialized with {len(self.playlists)} channel(s) to check. Cycles every {self.config.sleepTime} seconds. Check range: {self.config.checkRange}.")
+        self.log(f"Bot initialized with {len(self.playlists)} channel(s) to check. Sleeps between cycles for {self.config.sleepTime} second(s). Check range: {self.config.checkRange}.")
 
     def log(self, message:str) -> None:
         """Logs a message to the console and a log file."""
@@ -106,9 +110,11 @@ class Bot:
         """Cycles through the playlists and checks for new uploads. Downloads new findings and saves data in the database."""
         foundVideos = []
         for playlist in self.playlists: foundVideos += self.__checkplaylist__(playlist)
-        print(foundVideos)
-        self.driver.get("https://i.stack.imgur.com/kOnzy.gif")
+        for videoID in foundVideos:
+            if self.config.metadataRefresh or self.fetch(videoID) is None: self.insert(self.__getmetadata__(videoID))
+        self.driver.get("https://media.discordapp.net/attachments/854041386163634178/936372630150340638/jakiedylolek.gif?ex=662ebff7&is=662d6e77&hm=b314a708ac380ee3d369a2bb4981595620b28cea10d001eb2fbf94f488b2ed71")
 
+    #database functions
     def insert(self, video:Video) -> None:
         """Inserts a Video object into the database or updates it if entry with this ID already exists."""
         vid = session.query(Video).filter(Video.id == video.id)
@@ -173,6 +179,42 @@ class Bot:
             videoIDs.append(video.get_attribute("href").split("watch?v=")[1][:11])
         return videoIDs
             
-    def __getmetadata__(self, videoID:str) -> dict:
-        """Returns Video object."""
-        pass
+    def __getmetadata__(self, videoID:str) -> Video:
+        """Gathers metadata and returns Video object."""
+        match self.config.metadataSource:
+            case "page":
+                self.driver.get(f"https://www.youtube.com/watch?v={videoID}")
+                time.sleep(self.config.waitTime)
+
+                type = "live" if self.driver.find_elements(By.CSS_SELECTOR, "div.yt-live-chat-app") != [] else "video"
+
+                self.driver.find_element(By.ID, "expand").click()
+                time.sleep(1) #needed for the description to load
+
+                username = self.driver.find_element(By.CSS_SELECTOR, "#text > a").text
+                title = self.driver.find_element(By.CSS_SELECTOR, "#title > h1 > yt-formatted-string").text
+                descriptionParts = self.driver.find_elements(By.CLASS_NAME, "yt-core-attributed-string--link-inherit-color")
+                description = ""
+                for part in descriptionParts:
+                    description += self.__descriptionReconstructor__(part)
+                    
+                print(description)
+            case _: pass
+
+    def __descriptionReconstructor__(self, description) -> str:
+        """Reconstructs the description to be more readable."""
+        span = description.find_elements(By.TAG_NAME, "span")
+        a = description.find_elements(By.TAG_NAME, "a")
+
+        if len(span) == 0 and len(a) == 0: return description.text
+        elif len(span) != 0: inner = span[0].find_element(By.TAG_NAME, "a")
+        else: inner = a[0]
+
+        if inner.text.startswith("#"): return inner.text
+
+        try:
+            readableText = inner.get_attribute("href").split("&q=")[1] + "\n"
+        except IndexError:
+            readableText = inner.get_attribute("href") + "\n"
+        return readableText.encode('unicode')
+    

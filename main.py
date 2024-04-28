@@ -15,14 +15,12 @@ if __name__ == "__main__":
         # selecting to run once
         # selecting to run the metadata updater
 
-    bot.insert(atb.Video("seb32e", "łódź", "dessssscription", "channel", datetime.date.today()))
-
-    '''while True:
+    while True:
         try:
             bot.cycle()
             time.sleep(config.sleepTime)
-        except KeyboardInterrupt: break
+        except KeyboardInterrupt: exit()
         except Exception as e:
             bot.log(f"Error - {e}")
             if config.ignoreErrors: continue
-            break'''
+            break
