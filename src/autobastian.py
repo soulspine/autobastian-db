@@ -12,6 +12,8 @@ import selenium.webdriver.common
 from selenium.webdriver.common.by import By
 
 import selenium.webdriver.firefox
+import selenium.webdriver.remote
+import selenium.webdriver.remote.webelement
 from sqlalchemy import create_engine, Column, Integer, String, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -63,14 +65,15 @@ class Video(Base):
     title = Column("Title", String)
     description = Column("Description", String)
     channel = Column("Channel", String)
-    videoType = Column("Type", String)
+    type = Column("Type", String)
     date = Column("Date", Date)
 
-    def __init__(self, id:str, title:str, description:str, channel:str, date:datetime.datetime) -> None:
+    def __init__(self, id:str, title:str, description:str, channel:str, type:str, date:datetime.date) -> None:
         self.id = id
         self.title = title
         self.description = description
         self.channel = channel
+        self.type = type
         self.date = date
 
 engine = create_engine(f"sqlite:///{config.database}", echo=False)
@@ -111,15 +114,19 @@ class Bot:
         foundVideos = []
         for playlist in self.playlists: foundVideos += self.__checkplaylist__(playlist)
         for videoID in foundVideos:
-            if self.config.metadataRefresh or self.fetch(videoID) is None: self.insert(self.__getmetadata__(videoID))
+            vidObj = self.__getmetadata__(videoID)
+            if vidObj is None: continue #premiere
+            if self.config.metadataRefresh or self.fetch(videoID) is None: self.insert(vidObj)
         self.driver.get("https://media.discordapp.net/attachments/854041386163634178/936372630150340638/jakiedylolek.gif?ex=662ebff7&is=662d6e77&hm=b314a708ac380ee3d369a2bb4981595620b28cea10d001eb2fbf94f488b2ed71")
 
     #database functions
     def insert(self, video:Video) -> None:
         """Inserts a Video object into the database or updates it if entry with this ID already exists."""
+        print(f"Inserting {video.id} into the database.")
         vid = session.query(Video).filter(Video.id == video.id)
         if vid.first() is not None:
-            vid.update({Video.title: video.title, Video.description: video.description, Video.channel: video.channel, Video.date: video.date})
+            if vid.first().title != video.title or vid.first().description != video.description or vid.first().channel != video.channel or vid.first().type != video.type or vid.first().date != video.date: vid.update({Video.title: video.title, Video.description: video.description, Video.channel: video.channel, Video.date: video.date})
+            else : return
         else:
             session.add(video)
         session.commit()
@@ -186,35 +193,68 @@ class Bot:
                 self.driver.get(f"https://www.youtube.com/watch?v={videoID}")
                 time.sleep(self.config.waitTime)
 
-                type = "live" if self.driver.find_elements(By.CSS_SELECTOR, "div.yt-live-chat-app") != [] else "video"
-
                 self.driver.find_element(By.ID, "expand").click()
                 time.sleep(1) #needed for the description to load
 
-                username = self.driver.find_element(By.CSS_SELECTOR, "#text > a").text
+                try:    
+                    dateElem = self.driver.find_element(By.CSS_SELECTOR, "span.bold:nth-child(3)").text
+                except selenium.common.exceptions.NoSuchElementException:
+                    dateElem = self.driver.find_element(By.CSS_SELECTOR, "#info-container > yt-formatted-string:nth-child(3) > span:nth-child(1)").text
+                split = dateElem.split(" ")
+
+                for part in split:
+                    if part.lower().startswith("stream"): type = "live"
+                    if part.lower().startswith("schedule"): return None #premiere
+
+
+                channel = self.driver.find_element(By.CSS_SELECTOR, "#text > a").text
                 title = self.driver.find_element(By.CSS_SELECTOR, "#title > h1 > yt-formatted-string").text
-                descriptionParts = self.driver.find_elements(By.CLASS_NAME, "yt-core-attributed-string--link-inherit-color")
                 description = ""
-                for part in descriptionParts:
-                    description += self.__descriptionReconstructor__(part)
+                i = 1
+                while True:
+                    try:
+                        part = self.driver.find_element(By.CSS_SELECTOR, f"yt-attributed-string.ytd-text-inline-expander:nth-child(1) > span:nth-child(1) > span:nth-child({i})")
+                        description += self.__descriptionReconstructor__(part)
+                        i += 1
+                    except selenium.common.exceptions.NoSuchElementException:
+                        break
+                
+
+                month, day, year = split[-3], split[-2].replace(",",""), split[-1]
+                months = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6, "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
+                try:
+                    date = datetime.datetime.strptime(f"{day}-{months[month]}-{year}","%d-%m-%Y").date()
+                except:
+                    type = "live"
+                    date = None
+
+                return Video(videoID, title, description, channel, type, date)
+
                     
-                print(description)
+
             case _: pass
 
-    def __descriptionReconstructor__(self, description) -> str:
+    def __descriptionReconstructor__(self, description:selenium.webdriver.remote.webelement.WebElement) -> str:
         """Reconstructs the description to be more readable."""
         span = description.find_elements(By.TAG_NAME, "span")
         a = description.find_elements(By.TAG_NAME, "a")
 
-        if len(span) == 0 and len(a) == 0: return description.text
+        if len(span) == 0 and len(a) == 0: return description.get_attribute("innerHTML")
         elif len(span) != 0: inner = span[0].find_element(By.TAG_NAME, "a")
         else: inner = a[0]
 
-        if inner.text.startswith("#"): return inner.text
+        if inner.text.startswith("#"): return inner.get_attribute("innerHTML")
 
         try:
-            readableText = inner.get_attribute("href").split("&q=")[1] + "\n"
+            readableText = inner.get_attribute("href").split("&q=")[1]
         except IndexError:
-            readableText = inner.get_attribute("href") + "\n"
-        return readableText.encode('unicode')
+            readableText = inner.get_attribute("href")
+        
+        readableText = readableText.split("&v=")[0]
+        readableText = readableText.replace("%3A", ":")
+        readableText = readableText.replace("%2F", "/")
+        readableText = readableText.replace("%3F", "?")
+        readableText = readableText.replace("%3D", "=")
+
+        return readableText
     
