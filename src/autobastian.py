@@ -12,6 +12,8 @@ import selenium.webdriver.common
 from selenium.webdriver.common.by import By
 
 import selenium.webdriver.firefox
+import selenium.webdriver.firefox.firefox_binary
+import selenium.webdriver.firefox.service
 import selenium.webdriver.remote
 import selenium.webdriver.remote.webelement
 from sqlalchemy import create_engine, Column, Integer, String, Date
@@ -41,7 +43,7 @@ class Config:
             with open("config.json", "r") as file:
                 config = json.load(file)
         except FileNotFoundError:
-            raise FileNotFoundError("No config.json file found")
+            raise FileNotFoundError("Config.json not found.")
         
         for key, value in config.items():
             setattr(self, key, value)
@@ -83,7 +85,7 @@ session = Session()
 
 class Bot:
     def __init__(self, config:Config) -> None:
-        self.os:str = platform.system() # "Windows", "Linux"
+        if platform.system() != "Windows": raise OSError("This software is only compatible with Windows. Please check the documentation for Linux support.")
         self.playlists:list[str] = self.__getplaylists__(config.channels)
         self.driver:selenium.webdriver.Firefox = self.__getdriver__(config)
         self.config:Config = config
@@ -115,36 +117,28 @@ class Bot:
         for playlist in self.playlists: foundVideos += self.__checkplaylist__(playlist)
         for videoID in foundVideos:
             vidObj = self.__getmetadata__(videoID)
-            if vidObj is None: continue #premiere
+            if vidObj is None: continue #premiere or scheduled livestream
             if self.config.metadataRefresh or self.fetch(videoID) is None: self.insert(vidObj)
-        self.driver.get("https://media.discordapp.net/attachments/854041386163634178/936372630150340638/jakiedylolek.gif?ex=662ebff7&is=662d6e77&hm=b314a708ac380ee3d369a2bb4981595620b28cea10d001eb2fbf94f488b2ed71")
+        self.driver.get("https://muno.pl/wp-content/uploads/2017/12/a8d1d555c41cc07a32eb7d5072bd7f2e-850x570.jpg")
 
     #database functions
     def insert(self, video:Video) -> None:
         """Inserts a Video object into the database or updates it if entry with this ID already exists."""
-        print(f"Inserting {video.id} into the database.")
-        vid = session.query(Video).filter(Video.id == video.id)
-        if vid.first() is not None:
-            if vid.first().title != video.title or vid.first().description != video.description or vid.first().channel != video.channel or vid.first().type != video.type or vid.first().date != video.date: vid.update({Video.title: video.title, Video.description: video.description, Video.channel: video.channel, Video.date: video.date})
+        vid:Video = session.query(Video).filter(Video.id == video.id)
+        dbEntry:Video = vid.first()
+        if dbEntry is not None:
+            if dbEntry.type == "live": video.date = dbEntry.date #prevents live streams from being updated if they go past midnight
+            if self.__metadataChanged__(dbEntry, video):
+                vid.update({Video.title: video.title, Video.description: video.description, Video.channel: video.channel, Video.date: video.date})
             else : return
         else:
             session.add(video)
         session.commit()
+        self.log(f"Updated {video.id} metadata.")
 
     def fetch(self, videoID:str) -> Video:
         """Returns a Video object from the database."""
         return session.query(Video).filter(Video.id == videoID).first()
-
-    def __killalldrivers__(self) -> None:
-        """Kills all running webdrivers."""
-        match self.os.lower():
-            case "linux":
-                os.system("killall geckodriver")
-                os.system("killall firefox")
-            case "windows":
-                os.system("taskkill /F /IM firefox.exe")
-            case _:
-                raise OSError("Unsupported operating system")
 
     def __getplaylists__(self, channels:list[str]) -> list[str]:
         """Translating channel IDs to channel playlists, raises ValueError if invalid channel ID is found."""
@@ -167,13 +161,7 @@ class Bot:
         options.add_argument("-profile")
         options.add_argument(os.path.join(os.getcwd(), "FirefoxProfile"))
 
-        match self.os.lower():
-            case "linux":
-                return selenium.webdriver.Firefox(options=options, service=os.path.join(os.getcwd(), "src", "geckodriver"))
-            case "windows": 
-                return selenium.webdriver.Firefox(options=options)
-            case _:
-                raise OSError("Unsupported operating system")
+        return selenium.webdriver.Firefox(options=options)
             
     def __checkplaylist__(self, playlist:str) -> list[str]:
         """Checks a playlist for new uploads and returns them as list of IDs."""
@@ -202,9 +190,11 @@ class Bot:
                     dateElem = self.driver.find_element(By.CSS_SELECTOR, "#info-container > yt-formatted-string:nth-child(3) > span:nth-child(1)").text
                 split = dateElem.split(" ")
 
+                type = "video"
+
                 for part in split:
                     if part.lower().startswith("stream"): type = "live"
-                    if part.lower().startswith("schedule"): return None #premiere
+                    if part.lower().startswith("schedule") or part.lower().startswith("premier"): return None
 
 
                 channel = self.driver.find_element(By.CSS_SELECTOR, "#text > a").text
@@ -226,11 +216,11 @@ class Bot:
                     date = datetime.datetime.strptime(f"{day}-{months[month]}-{year}","%d-%m-%Y").date()
                 except:
                     type = "live"
-                    date = None
+                    date = datetime.datetime.now().date()
 
                 return Video(videoID, title, description, channel, type, date)
-
-                    
+            
+            # TODO case "api":
 
             case _: pass
 
@@ -258,3 +248,7 @@ class Bot:
 
         return readableText
     
+    def __metadataChanged__(self, dbEntry:Video, video:Video) -> bool:
+        """Checks if the metadata of a video has changed."""
+        if (dbEntry.title != video.title) or (dbEntry.description != video.description) or (dbEntry.channel != video.channel) or (dbEntry.date != video.date): return True
+        else: return False
